@@ -20,10 +20,21 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 
+# ---------------- MEMORY ----------------
 ema = {}
 ema_var = {}
 
+# ---------------- SAFE JSON ----------------
+async def safe_json(resp):
+    try:
+        return await resp.json()
+    except Exception:
+        text = await resp.text()
+        logging.warning(f"BAD JSON RESPONSE: {text[:200]}")
+        return None
 
+
+# ---------------- MATH ----------------
 def safe_div(a, b):
     return a / b if b != 0 else 0
 
@@ -52,6 +63,7 @@ def zscore(key, value):
     return (value - m) / v
 
 
+# ---------------- TELEGRAM ALERT ----------------
 async def send_alert(session, text):
     if not BOT_TOKEN or not CHAT_ID:
         return
@@ -69,6 +81,7 @@ async def send_alert(session, text):
         logging.error(f"Telegram error: {e}")
 
 
+# ---------------- SYMBOLS ----------------
 async def fetch_symbols(session):
     url = f"{BASE}/v5/market/instruments-info"
     params = {"category": "linear", "limit": 1000}
@@ -81,19 +94,28 @@ async def fetch_symbols(session):
         if cursor:
             p["cursor"] = cursor
 
-        async with session.get(url, params=p) as r:
-            data = await r.json()
+        try:
+            async with session.get(url, params=p) as r:
+                data = await safe_json(r)
 
-        for s in data["result"]["list"]:
-            symbols.append(s["symbol"])
+            if not data or "result" not in data:
+                return symbols
 
-        cursor = data["result"].get("nextPageCursor")
-        if not cursor:
-            break
+            for s in data["result"]["list"]:
+                symbols.append(s["symbol"])
+
+            cursor = data["result"].get("nextPageCursor")
+            if not cursor:
+                break
+
+        except Exception as e:
+            logging.error(f"symbols error: {e}")
+            return symbols
 
     return symbols
 
 
+# ---------------- DATA ----------------
 async def fetch_data(session, symbol, sem):
     async with sem:
         try:
@@ -110,13 +132,16 @@ async def fetch_data(session, symbol, sem):
             async with session.get(oi_url, params=params) as r1, \
                        session.get(k_url, params=params) as r2:
 
-                oi_data = await r1.json()
-                k_data = await r2.json()
+                oi_data = await safe_json(r1)
+                k_data = await safe_json(r2)
 
-            oi_list = oi_data["result"]["list"]
-            kl_list = k_data["result"]["list"]
+            if not oi_data or not k_data:
+                return None
 
-            if len(oi_list) < 5:
+            oi_list = oi_data.get("result", {}).get("list", [])
+            kl_list = k_data.get("result", {}).get("list", [])
+
+            if len(oi_list) < 5 or len(kl_list) < 5:
                 return None
 
             oi = float(oi_list[0]["openInterest"])
@@ -125,10 +150,11 @@ async def fetch_data(session, symbol, sem):
 
             return symbol, oi, close, vol
 
-        except:
+        except Exception:
             return None
 
 
+# ---------------- ANALYSIS ----------------
 def analyze(symbol, oi, close, vol):
     if oi < MIN_OI:
         return None
@@ -171,10 +197,21 @@ def get_leaders(data):
     return sorted(data, key=lambda x: x["score"], reverse=True)[:3]
 
 
+# ---------------- MAIN ----------------
 async def main():
-    async with aiohttp.ClientSession() as session:
+    headers = {
+        "User-Agent": "Mozilla/5.0",
+        "Accept": "application/json"
+    }
+
+    async with aiohttp.ClientSession(headers=headers) as session:
         symbols = await fetch_symbols(session)
-        logging.info(f"symbols: {len(symbols)}")
+
+        if not symbols:
+            logging.error("No symbols loaded")
+            return
+
+        logging.info(f"symbols loaded: {len(symbols)}")
 
         sem = asyncio.Semaphore(CONCURRENCY)
 
@@ -202,7 +239,7 @@ async def main():
                     f"oi_z={l['oi_z']:.2f} vol_z={l['vol_z']:.2f}"
                 )
 
-            # ALERTS
+            # ALERT
             if leaders:
                 top = leaders[0]
 
