@@ -1,22 +1,62 @@
 import asyncio
 import json
 import logging
+import aiohttp
 import websockets
 
+BASE_REST = "https://api.bybit.com"
 WS_URL = "wss://stream.bybit.com/v5/public/linear"
+
+BATCH_SIZE = 50  # важно: не перегружать WS
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
 
 
-async def ws_dump():
+# ---------------- GET ALL SYMBOLS ----------------
+async def get_symbols():
+    url = f"{BASE_REST}/v5/market/instruments-info"
+    params = {"category": "linear", "limit": 1000}
+
+    symbols = []
+    cursor = None
+
+    async with aiohttp.ClientSession() as session:
+        while True:
+            p = dict(params)
+            if cursor:
+                p["cursor"] = cursor
+
+            async with session.get(url, params=p) as r:
+                data = await r.json()
+
+            for s in data["result"]["list"]:
+                symbols.append(s["symbol"])
+
+            cursor = data["result"].get("nextPageCursor")
+            if not cursor:
+                break
+
+    return symbols
+
+
+# ---------------- SPLIT INTO BATCHES ----------------
+def chunk_list(lst, size):
+    for i in range(0, len(lst), size):
+        yield lst[i:i + size]
+
+
+# ---------------- WS HANDLER ----------------
+async def ws_worker(batch_id, symbols):
     async with websockets.connect(WS_URL, ping_interval=20) as ws:
+
+        args = [f"tickers.{s}" for s in symbols]
 
         await ws.send(json.dumps({
             "op": "subscribe",
-            "args": ["tickers.*"]
+            "args": args
         }))
 
-        logging.info("Subscribed to tickers")
+        logging.info(f"[Batch {batch_id}] Subscribed {len(symbols)} symbols")
 
         while True:
             msg = await ws.recv()
@@ -24,21 +64,40 @@ async def ws_dump():
             try:
                 data = json.loads(msg)
             except:
-                logging.info(f"RAW (not json): {msg}")
                 continue
 
-            # просто печатаем ВСЁ что приходит
-            logging.info("========== NEW MESSAGE ==========")
-            logging.info(json.dumps(data, indent=2)[:2000])  # ограничение вывода
+            if "data" not in data:
+                continue
+
+            items = data["data"]
+
+            if not isinstance(items, list):
+                continue
+
+            for item in items:
+                symbol = item.get("symbol")
+                price = item.get("lastPrice")
+                volume = item.get("turnover24h")
+
+                logging.info(
+                    f"[{batch_id}] {symbol} price={price} vol={volume}"
+                )
 
 
+# ---------------- MAIN ----------------
 async def main():
-    while True:
-        try:
-            await ws_dump()
-        except Exception as e:
-            logging.error(f"Reconnect: {e}")
-            await asyncio.sleep(2)
+    symbols = await get_symbols()
+
+    logging.info(f"Total symbols: {len(symbols)}")
+
+    batches = list(chunk_list(symbols, BATCH_SIZE))
+
+    tasks = []
+
+    for i, batch in enumerate(batches):
+        tasks.append(ws_worker(i, batch))
+
+    await asyncio.gather(*tasks)
 
 
 if __name__ == "__main__":
