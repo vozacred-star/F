@@ -3,8 +3,11 @@ import aiohttp
 import logging
 import math
 import os
+from aiohttp_socks import ProxyConnector
 
 BASE = "https://api.bybit.com"
+
+PROXY = "socks5://184.178.172.5:15303"
 
 LIMIT = 10
 POLL = 20
@@ -16,22 +19,33 @@ ALERT_THRESHOLD = 50
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
 
-# ---------------- TELEGRAM ----------------
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 
-# ---------------- MEMORY ----------------
 ema = {}
 ema_var = {}
+
 
 # ---------------- SAFE JSON ----------------
 async def safe_json(resp):
     try:
         return await resp.json()
-    except Exception:
+    except:
         text = await resp.text()
-        logging.warning(f"BAD JSON RESPONSE: {text[:200]}")
+        logging.warning(f"BAD JSON: {text[:200]}")
         return None
+
+
+# ---------------- RETRY REQUEST ----------------
+async def safe_request(session, url, params=None):
+    for _ in range(3):
+        try:
+            async with session.get(url, params=params, timeout=10) as r:
+                return await safe_json(r)
+        except Exception as e:
+            logging.warning(f"retry request error: {e}")
+            await asyncio.sleep(1)
+    return None
 
 
 # ---------------- MATH ----------------
@@ -63,7 +77,7 @@ def zscore(key, value):
     return (value - m) / v
 
 
-# ---------------- TELEGRAM ALERT ----------------
+# ---------------- TELEGRAM ----------------
 async def send_alert(session, text):
     if not BOT_TOKEN or not CHAT_ID:
         return
@@ -94,23 +108,18 @@ async def fetch_symbols(session):
         if cursor:
             p["cursor"] = cursor
 
-        try:
-            async with session.get(url, params=p) as r:
-                data = await safe_json(r)
+        data = await safe_request(session, url, p)
 
-            if not data or "result" not in data:
-                return symbols
-
-            for s in data["result"]["list"]:
-                symbols.append(s["symbol"])
-
-            cursor = data["result"].get("nextPageCursor")
-            if not cursor:
-                break
-
-        except Exception as e:
-            logging.error(f"symbols error: {e}")
+        if not data or "result" not in data:
+            logging.error("Failed to load symbols (proxy/API blocked)")
             return symbols
+
+        for s in data["result"]["list"]:
+            symbols.append(s["symbol"])
+
+        cursor = data["result"].get("nextPageCursor")
+        if not cursor:
+            break
 
     return symbols
 
@@ -129,11 +138,8 @@ async def fetch_data(session, symbol, sem):
                 "limit": LIMIT
             }
 
-            async with session.get(oi_url, params=params) as r1, \
-                       session.get(k_url, params=params) as r2:
-
-                oi_data = await safe_json(r1)
-                k_data = await safe_json(r2)
+            oi_data = await safe_request(session, oi_url, params)
+            k_data = await safe_request(session, k_url, params)
 
             if not oi_data or not k_data:
                 return None
@@ -150,7 +156,7 @@ async def fetch_data(session, symbol, sem):
 
             return symbol, oi, close, vol
 
-        except Exception:
+        except:
             return None
 
 
@@ -199,19 +205,25 @@ def get_leaders(data):
 
 # ---------------- MAIN ----------------
 async def main():
+    connector = ProxyConnector.from_url(PROXY)
+
     headers = {
         "User-Agent": "Mozilla/5.0",
         "Accept": "application/json"
     }
 
-    async with aiohttp.ClientSession(headers=headers) as session:
+    async with aiohttp.ClientSession(
+        connector=connector,
+        headers=headers
+    ) as session:
+
         symbols = await fetch_symbols(session)
 
         if not symbols:
-            logging.error("No symbols loaded")
+            logging.error("NO SYMBOLS → proxy dead or blocked")
             return
 
-        logging.info(f"symbols loaded: {len(symbols)}")
+        logging.info(f"symbols: {len(symbols)}")
 
         sem = asyncio.Semaphore(CONCURRENCY)
 
@@ -239,7 +251,6 @@ async def main():
                     f"oi_z={l['oi_z']:.2f} vol_z={l['vol_z']:.2f}"
                 )
 
-            # ALERT
             if leaders:
                 top = leaders[0]
 
