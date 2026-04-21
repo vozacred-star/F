@@ -1,2 +1,2 @@
+websockets
 aiohttp
-aiohttp_socks
