@@ -7,12 +7,7 @@ from aiohttp_socks import ProxyConnector
 
 BASE = "https://api.bybit.com"
 
-PROXIES = [
-    "socks5://51.158.68.133:8811",
-    "socks5://51.75.126.150:1080",
-    "socks5://8.210.83.33:1080",
-    "socks5://162.19.7.47:5678",
-]
+PROXY = "socks5://103.36.11.18:8199"
 LIMIT = 10
 POLL = 20
 CONCURRENCY = 50
