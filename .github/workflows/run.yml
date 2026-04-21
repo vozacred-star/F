@@ -10,7 +10,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout
+      - name: Checkout repo
         uses: actions/checkout@v4
 
       - name: Setup Python
@@ -18,8 +18,12 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install deps
-        run: pip install aiohttp
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install aiohttp
+          pip install aiohttp_socks
+          pip install python-socks
 
       - name: Run bot
         env:
