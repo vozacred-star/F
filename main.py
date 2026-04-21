@@ -7,12 +7,30 @@ import websockets
 BASE_REST = "https://api.bybit.com"
 WS_URL = "wss://stream.bybit.com/v5/public/linear"
 
-BATCH_SIZE = 50  # важно: не перегружать WS
+BATCH_SIZE = 50
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
 
 
-# ---------------- GET ALL SYMBOLS ----------------
+# ---------------- SAFE REST REQUEST ----------------
+async def safe_get_json(session, url, params):
+    try:
+        async with session.get(url, params=params, timeout=10) as r:
+            text = await r.text()
+
+            # если HTML или блок
+            if "result" not in text:
+                logging.warning(f"BAD RESPONSE: {text[:200]}")
+                return None
+
+            return json.loads(text)
+
+    except Exception as e:
+        logging.warning(f"REQ ERROR: {e}")
+        return None
+
+
+# ---------------- GET SYMBOLS ----------------
 async def get_symbols():
     url = f"{BASE_REST}/v5/market/instruments-info"
     params = {"category": "linear", "limit": 1000}
@@ -26,8 +44,13 @@ async def get_symbols():
             if cursor:
                 p["cursor"] = cursor
 
-            async with session.get(url, params=p) as r:
-                data = await r.json()
+            data = await safe_get_json(session, url, p)
+
+            if not data:
+                return symbols
+
+            if "result" not in data:
+                return symbols
 
             for s in data["result"]["list"]:
                 symbols.append(s["symbol"])
@@ -39,13 +62,13 @@ async def get_symbols():
     return symbols
 
 
-# ---------------- SPLIT INTO BATCHES ----------------
-def chunk_list(lst, size):
+# ---------------- CHUNK ----------------
+def chunk(lst, size):
     for i in range(0, len(lst), size):
         yield lst[i:i + size]
 
 
-# ---------------- WS HANDLER ----------------
+# ---------------- WS WORKER ----------------
 async def ws_worker(batch_id, symbols):
     async with websockets.connect(WS_URL, ping_interval=20) as ws:
 
@@ -56,7 +79,7 @@ async def ws_worker(batch_id, symbols):
             "args": args
         }))
 
-        logging.info(f"[Batch {batch_id}] Subscribed {len(symbols)} symbols")
+        logging.info(f"[{batch_id}] subscribed {len(symbols)} symbols")
 
         while True:
             msg = await ws.recv()
@@ -88,9 +111,13 @@ async def ws_worker(batch_id, symbols):
 async def main():
     symbols = await get_symbols()
 
+    if not symbols:
+        logging.error("NO SYMBOLS (blocked or API fail)")
+        return
+
     logging.info(f"Total symbols: {len(symbols)}")
 
-    batches = list(chunk_list(symbols, BATCH_SIZE))
+    batches = list(chunk(symbols, BATCH_SIZE))
 
     tasks = []
 
